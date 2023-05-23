@@ -29,6 +29,15 @@ public class MoneyTransferService {
     final Object firstLock;
     final Object secondLock;
 
+    /*
+    Locking should be done on both accounts to perform safe transfer.
+    More over the order of locking is important to avoid deadlock.
+
+    If the condition below is commended out and locks aren't ordered:
+      firstLock = fromAccount.getAccountId().intern();
+      secondLock = toAccount.getAccountId().intern();
+    Then existing tests will hang due to the deadlock.
+    */
     if (fromAccount.getAccountId().compareTo(toAccount.getAccountId()) > 0) {
       firstLock = fromAccount.getAccountId().intern();
       secondLock = toAccount.getAccountId().intern();
