@@ -12,6 +12,8 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 
+import static java.util.Optional.ofNullable;
+
 @Service
 @RequiredArgsConstructor
 @FieldDefaults(level = AccessLevel.PRIVATE, makeFinal = true)
@@ -21,10 +23,16 @@ public class MoneyTransferService {
   NotificationService notificationService;
 
   public void transferMoney(final MoneyTransfer moneyTransfer) {
-    validateMoneyTransfer(moneyTransfer);
+    if (moneyTransfer.getFromAccountId().equals(moneyTransfer.getToAccountId())) {
+      throw new DuplicateAccountIdException("Cannot transfer money to the same account: "
+        + moneyTransfer.getFromAccountId());
+    }
 
-    final Account fromAccount = this.accountsService.getAccount(moneyTransfer.getFromAccountId());
-    final Account toAccount = this.accountsService.getAccount(moneyTransfer.getToAccountId());
+    final Account fromAccount = ofNullable(this.accountsService.getAccount(moneyTransfer.getFromAccountId()))
+      .orElseThrow(() -> new AccountNotFoundException(moneyTransfer.getFromAccountId()));
+
+    final Account toAccount = ofNullable(this.accountsService.getAccount(moneyTransfer.getToAccountId()))
+      .orElseThrow(() -> new AccountNotFoundException(moneyTransfer.getToAccountId()));
 
     final Object firstLock;
     final Object secondLock;
@@ -36,7 +44,7 @@ public class MoneyTransferService {
     If the condition below is commended out and locks aren't ordered:
       firstLock = fromAccount.getAccountId().intern();
       secondLock = toAccount.getAccountId().intern();
-    Then existing tests will hang due to the deadlock.
+    Then the code is deadlock-prone.
     */
     if (fromAccount.getAccountId().compareTo(toAccount.getAccountId()) > 0) {
       firstLock = fromAccount.getAccountId().intern();
@@ -47,9 +55,7 @@ public class MoneyTransferService {
     }
 
     synchronized (firstLock) {
-      delay();
       synchronized (secondLock) {
-        delay();
         final BigDecimal fromAccountNewBalance = fromAccount.getBalance().subtract(moneyTransfer.getAmount());
         if (fromAccountNewBalance.compareTo(BigDecimal.ZERO) < 0) {
           throw new InsufficientFundsException(fromAccount.getAccountId());
@@ -63,32 +69,6 @@ public class MoneyTransferService {
         this.notificationService.notifyAboutTransfer(toAccount,
                 "received " + moneyTransfer.getAmount() + " from " + fromAccount.getAccountId());
       }
-    }
-  }
-
-  private void validateMoneyTransfer(final MoneyTransfer moneyTransfer) {
-    if (moneyTransfer.getFromAccountId().equals(moneyTransfer.getToAccountId())) {
-      throw new DuplicateAccountIdException("Cannot transfer money to the same account: "
-              + moneyTransfer.getFromAccountId());
-    }
-
-    final Account fromAccount = this.accountsService.getAccount(moneyTransfer.getFromAccountId());
-    if (fromAccount == null) {
-      throw new AccountNotFoundException(moneyTransfer.getFromAccountId());
-    }
-
-    final Account toAccount = this.accountsService.getAccount(moneyTransfer.getToAccountId());
-    if (toAccount == null) {
-      throw new AccountNotFoundException(moneyTransfer.getToAccountId());
-    }
-  }
-
-  // artificial delay to verify deadlock
-  private void delay() {
-    try {
-      Thread.sleep(1);
-    } catch (InterruptedException e) {
-      // ignore
     }
   }
 }
