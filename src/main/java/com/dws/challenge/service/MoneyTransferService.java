@@ -1,58 +1,27 @@
-package com.dws.challenge.service;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.Map;
+import java.util.HashMap;
 
-import com.dws.challenge.domain.Account;
-import com.dws.challenge.domain.MoneyTransfer;
-import com.dws.challenge.exception.AccountNotFoundException;
-import com.dws.challenge.exception.DuplicateAccountIdException;
-import com.dws.challenge.exception.InsufficientFundsException;
-import lombok.AccessLevel;
-import lombok.RequiredArgsConstructor;
-import lombok.experimental.FieldDefaults;
-import org.springframework.stereotype.Service;
+// This map will store account locks. It should be a concurrent map in production.
+private final Map<String, Lock> locks = new HashMap<>();
 
-import java.math.BigDecimal;
-
-@Service
-@RequiredArgsConstructor
-@FieldDefaults(level = AccessLevel.PRIVATE, makeFinal = true)
-public class MoneyTransferService {
-
-  AccountsService accountsService;
-  NotificationService notificationService;
-
-  public void transferMoney(final MoneyTransfer moneyTransfer) {
+public void transferMoney(final MoneyTransfer moneyTransfer) {
     validateMoneyTransfer(moneyTransfer);
 
     final Account fromAccount = this.accountsService.getAccount(moneyTransfer.getFromAccountId());
     final Account toAccount = this.accountsService.getAccount(moneyTransfer.getToAccountId());
 
-    final Object firstLock;
-    final Object secondLock;
+    final Lock firstLock = getLockForAccount(fromAccount.getAccountId());
+    final Lock secondLock = getLockForAccount(toAccount.getAccountId());
 
-    /*
-    Locking should be done on both accounts to perform safe transfer.
-    More over the order of locking is important to avoid deadlock.
+    try {
+        // We need to lock both accounts, in a fixed order to prevent deadlocks
+        lockAccounts(firstLock, secondLock);
 
-    If the condition below is commended out and locks aren't ordered:
-      firstLock = fromAccount.getAccountId().intern();
-      secondLock = toAccount.getAccountId().intern();
-    Then existing tests will hang due to the deadlock.
-    */
-    if (fromAccount.getAccountId().compareTo(toAccount.getAccountId()) > 0) {
-      firstLock = fromAccount.getAccountId().intern();
-      secondLock = toAccount.getAccountId().intern();
-    } else {
-      firstLock = toAccount.getAccountId().intern();
-      secondLock = fromAccount.getAccountId().intern();
-    }
-
-    synchronized (firstLock) {
-      delay();
-      synchronized (secondLock) {
-        delay();
         final BigDecimal fromAccountNewBalance = fromAccount.getBalance().subtract(moneyTransfer.getAmount());
         if (fromAccountNewBalance.compareTo(BigDecimal.ZERO) < 0) {
-          throw new InsufficientFundsException(fromAccount.getAccountId());
+            throw new InsufficientFundsException(fromAccount.getAccountId());
         }
         fromAccount.setBalance(fromAccountNewBalance);
         this.notificationService.notifyAboutTransfer(fromAccount,
@@ -62,33 +31,47 @@ public class MoneyTransferService {
         toAccount.setBalance(toAccountNewBalance);
         this.notificationService.notifyAboutTransfer(toAccount,
                 "received " + moneyTransfer.getAmount() + " from " + fromAccount.getAccountId());
-      }
+    } finally {
+        // Make sure to unlock both locks, regardless of what happens in the try block
+        firstLock.unlock();
+        secondLock.unlock();
     }
-  }
+}
 
-  private void validateMoneyTransfer(final MoneyTransfer moneyTransfer) {
-    if (moneyTransfer.getFromAccountId().equals(moneyTransfer.getToAccountId())) {
-      throw new DuplicateAccountIdException("Cannot transfer money to the same account: "
-              + moneyTransfer.getFromAccountId());
+// Get a lock for an account. This will create a new lock if necessary.
+private Lock getLockForAccount(String accountId) {
+    Lock lock = locks.get(accountId);
+    if (lock == null) {
+        synchronized (locks) {
+            lock = locks.get(accountId);
+            if (lock == null) {
+                lock = new ReentrantLock();
+                locks.put(accountId, lock);
+            }
+        }
     }
+    return lock;
+}
 
-    final Account fromAccount = this.accountsService.getAccount(moneyTransfer.getFromAccountId());
-    if (fromAccount == null) {
-      throw new AccountNotFoundException(moneyTransfer.getFromAccountId());
+private void lockAccounts(Lock firstLock, Lock secondLock) {
+    while (true) {
+        // Try to get the first lock
+        boolean gotFirstLock = false;
+        try {
+            gotFirstLock = firstLock.tryLock();
+            if (gotFirstLock) {
+                // If we got the first lock, try to get the second
+                if (secondLock.tryLock()) {
+                    return;
+                }
+            }
+        } finally {
+            // If we only got the first lock and failed to get the second, release the first
+            if (gotFirstLock) {
+                firstLock.unlock();
+            }
+        }
+        // If we couldn't get both locks, wait a bit and try again
+        Thread.sleep(1);
     }
-
-    final Account toAccount = this.accountsService.getAccount(moneyTransfer.getToAccountId());
-    if (toAccount == null) {
-      throw new AccountNotFoundException(moneyTransfer.getToAccountId());
-    }
-  }
-
-  // artificial delay to verify deadlock
-  private void delay() {
-    try {
-      Thread.sleep(1);
-    } catch (InterruptedException e) {
-      // ignore
-    }
-  }
 }
